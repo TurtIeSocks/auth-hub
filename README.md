@@ -83,8 +83,7 @@ auth-hub carries on with the last good one rather than dropping auth on a typo.
 There are two layers, and they're deliberately different values:
 
 - **`secret`** — what Dragonite sends. auth-hub checks it on every request
-  (constant-time) and returns `403` if it's wrong. Without it auth-hub would be
-  an open relay onto your auth servers, so it's required.
+  (constant-time) and returns `403` if it's wrong. Highly recommended.
 - **`pool.upstream.secret`** — what each real auth server expects. auth-hub
   swaps Dragonite's secret out for this one before forwarding. Dragonite's
   secret is never sent upstream.

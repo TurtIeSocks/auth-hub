@@ -7,7 +7,7 @@ listen = ":9090"
 
 # The secret Dragonite must send. Put this exact value in Dragonite's
 # remote_auth_secret. auth-hub checks it, then replaces it with the matching
-# upstream's own secret before forwarding. Required.
+# upstream's own secret before forwarding.
 secret = "pick-a-long-random-string"
 
 # One [[pool]] per account provider type. Dragonite's remote_auth_url points at

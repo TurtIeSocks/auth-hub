@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 
@@ -59,7 +60,8 @@ func loadConfig(path string) (*config, error) {
 	// The inbound secret is the only thing standing between the internet and a
 	// pool of working auth servers. An empty one would make this an open relay.
 	if cfg.Secret == "" {
-		return nil, fmt.Errorf("secret is required (Dragonite sends it as remote_auth_secret)")
+		log.Printf("the secret was not set, auth-hub might be vulnerable to the world!")
+		// return nil, fmt.Errorf("secret is required (Dragonite sends it as remote_auth_secret)")
 	}
 	if len(cfg.Pools) == 0 {
 		return nil, fmt.Errorf("at least one [[pool]] is required")
