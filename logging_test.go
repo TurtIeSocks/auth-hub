@@ -15,7 +15,7 @@ import (
 // splits one across stdout and stderr.
 func testLogger(level slog.Level) (*slog.Logger, *bytes.Buffer, *bytes.Buffer) {
 	var out, err bytes.Buffer
-	opts := &slog.HandlerOptions{Level: level, ReplaceAttr: nameTrace}
+	opts := &slog.HandlerOptions{Level: level}
 	return slog.New(splitHandler{
 		out: slog.NewTextHandler(&out, opts),
 		err: slog.NewTextHandler(&err, opts),
@@ -25,16 +25,14 @@ func testLogger(level slog.Level) (*slog.Logger, *bytes.Buffer, *bytes.Buffer) {
 // The whole point of the split: stdout carries what happened, stderr carries
 // only what went wrong.
 func TestSplitHandlerRoutesByLevel(t *testing.T) {
-	log, out, errBuf := testLogger(levelTrace)
+	log, out, errBuf := testLogger(slog.LevelDebug)
 
-	trace := func(msg string) { log.Log(context.Background(), levelTrace, msg) }
-	trace("to-out-trace")
 	log.Debug("to-out-debug")
 	log.Info("to-out-info")
 	log.Warn("to-err-warn")
 	log.Error("to-err-error")
 
-	for _, want := range []string{"to-out-trace", "to-out-debug", "to-out-info"} {
+	for _, want := range []string{"to-out-debug", "to-out-info"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("stdout missing %q, got: %s", want, out)
 		}
@@ -52,25 +50,14 @@ func TestSplitHandlerRoutesByLevel(t *testing.T) {
 	}
 }
 
-// slog would render our level as "DEBUG-4" left to itself.
-func TestTraceLevelIsNamed(t *testing.T) {
-	log, out, _ := testLogger(levelTrace)
-	log.Log(context.Background(), levelTrace, "hello")
-
-	if !strings.Contains(out.String(), "level=TRACE") {
-		t.Errorf("want level=TRACE, got: %s", out)
-	}
-}
-
 // Below the configured level, nothing is written at all — including to the file
 // the writers may be teed into.
 func TestLevelFilters(t *testing.T) {
 	log, out, _ := testLogger(slog.LevelInfo)
-	log.Log(context.Background(), levelTrace, "trace-msg")
 	log.Debug("debug-msg")
 	log.Info("info-msg")
 
-	if strings.Contains(out.String(), "trace-msg") || strings.Contains(out.String(), "debug-msg") {
+	if strings.Contains(out.String(), "debug-msg") {
 		t.Errorf("level=info still logged below info: %s", out)
 	}
 	if !strings.Contains(out.String(), "info-msg") {
@@ -134,7 +121,7 @@ func TestCallerGaveUpIsNotAnUpstreamError(t *testing.T) {
 
 func TestParseLevel(t *testing.T) {
 	for in, want := range map[string]slog.Level{
-		"trace": levelTrace,
+		"debug": slog.LevelDebug,
 		"DEBUG": slog.LevelDebug, // case is not the user's problem
 		"info":  slog.LevelInfo,
 		"warn":  slog.LevelWarn,
@@ -145,8 +132,10 @@ func TestParseLevel(t *testing.T) {
 			t.Errorf("parseLevel(%q) = %v, %v; want %v", in, got, err, want)
 		}
 	}
-	if _, err := parseLevel("verbose"); err == nil {
-		t.Error("parseLevel accepted a level that doesn't exist")
+	for _, gone := range []string{"verbose", "trace"} {
+		if _, err := parseLevel(gone); err == nil {
+			t.Errorf("parseLevel accepted %q, which is not a level", gone)
+		}
 	}
 }
 
@@ -176,8 +165,77 @@ func TestLogConfigDefaults(t *testing.T) {
 	if cfg.Log.Level != "info" || cfg.Log.Format != "text" {
 		t.Errorf("defaults = %q/%q, want info/text", cfg.Log.Level, cfg.Log.Format)
 	}
-	if cfg.Log.File != "" {
-		t.Errorf("file = %q, want the streams alone by default", cfg.Log.File)
+	if cfg.Log.SaveToFile {
+		t.Error("save_to_file defaulted on, want the streams alone")
+	}
+}
+
+// The date in the name is the only rotation there is, so a hub that runs past
+// midnight has to move to the new day's file rather than writing to yesterday's
+// for ever.
+func TestDailyWriterRollsOverAtMidnight(t *testing.T) {
+	inTempLogDir(t)
+
+	w := &dailyWriter{}
+	for _, day := range []string{"2026-07-14", "2026-07-15"} {
+		if err := w.open(day); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.f.WriteString(day + " line\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for day, want := range map[string]string{
+		"2026-07-14": "2026-07-14 line\n",
+		"2026-07-15": "2026-07-15 line\n",
+	} {
+		got, err := os.ReadFile(filepath.Join(logDir, "auth-hub-"+day+".log"))
+		if err != nil {
+			t.Fatalf("%s: %v", day, err)
+		}
+		if string(got) != want {
+			t.Errorf("auth-hub-%s.log = %q, want %q", day, got, want)
+		}
+	}
+}
+
+// Write picks the day itself, and appends rather than truncating, so a restart
+// doesn't eat the earlier part of the day.
+func TestDailyWriterWritesTodayAndAppends(t *testing.T) {
+	inTempLogDir(t)
+
+	for _, line := range []string{"first\n", "second\n"} {
+		w := &dailyWriter{} // a fresh one each time, as a restart would be
+		if _, err := w.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	name := filepath.Join(logDir, "auth-hub-"+today()+".log")
+	got, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("nothing at %s: %v", name, err)
+	}
+	if string(got) != "first\nsecond\n" {
+		t.Errorf("%s = %q, want both lines", name, got)
+	}
+}
+
+// inTempLogDir runs the test in a scratch working directory, since logDir is
+// relative to it.
+func inTempLogDir(t *testing.T) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(old) })
+	if err := os.MkdirAll(logDir, 0o750); err != nil {
+		t.Fatal(err)
 	}
 }
 

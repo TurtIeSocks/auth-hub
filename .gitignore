@@ -28,3 +28,4 @@ go.work.sum
 config.toml
 auth-hub
 config/
+logs/*.log

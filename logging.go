@@ -7,13 +7,11 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
-
-// levelTrace sits below slog's own floor. slog names four levels and stops at
-// Debug, but its levels are plain ints precisely so callers can add their own.
-const levelTrace = slog.Level(-8)
 
 // levelVar carries the level into the handler by reference, so a reload can
 // move it without rebuilding anything. It's the one part of the log config that
@@ -25,7 +23,6 @@ var levelVar = new(slog.LevelVar)
 var current *logConfig
 
 var levels = map[string]slog.Level{
-	"trace": levelTrace,
 	"debug": slog.LevelDebug,
 	"info":  slog.LevelInfo,
 	"warn":  slog.LevelWarn,
@@ -35,7 +32,7 @@ var levels = map[string]slog.Level{
 func parseLevel(s string) (slog.Level, error) {
 	l, ok := levels[strings.ToLower(s)]
 	if !ok {
-		return 0, fmt.Errorf("level %q is not one of trace, debug, info, warn, error", s)
+		return 0, fmt.Errorf("level %q is not one of debug, info, warn, error", s)
 	}
 	return l, nil
 }
@@ -52,34 +49,33 @@ func setupLogging(c logConfig) error {
 
 	if current != nil {
 		levelVar.Set(level)
-		if c.Format != current.Format || c.File != current.File {
-			slog.Warn("log format and file only apply at startup; restart to change them",
-				"running_format", current.Format, "running_file", current.File)
+		if c.Format != current.Format || c.SaveToFile != current.SaveToFile {
+			slog.Warn("log format and save_to_file only apply at startup; restart to change them",
+				"running_format", current.Format, "running_save_to_file", current.SaveToFile)
 		}
 		return nil
 	}
 	levelVar.Set(level)
 
 	out, errOut := io.Writer(os.Stdout), io.Writer(os.Stderr)
-	if c.File != "" {
-		f, err := os.OpenFile(c.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
-		if err != nil {
+	if c.SaveToFile {
+		if err := os.MkdirAll(logDir, 0o750); err != nil {
+			return fmt.Errorf("log dir: %w", err)
+		}
+		w := &dailyWriter{}
+		// Opened now rather than on the first line written, so that somewhere
+		// unwritable fails the config that asked for it instead of throwing
+		// every message away in silence.
+		if err := w.open(today()); err != nil {
 			return fmt.Errorf("log file: %w", err)
 		}
 		// Added to the streams rather than replacing them: the streams are what
 		// docker logs and journald read, and losing those to gain a file would
-		// be a bad trade. Never closed, because it lives exactly as long as the
-		// process does. Appended to, so a restart doesn't eat the evidence of
-		// why the last one stopped.
-		//
-		// Both handlers write here and each locks only its own stream, so the
-		// file needs a lock of its own to keep a warn from landing in the
-		// middle of an info's line.
-		shared := &syncWriter{w: f}
-		out, errOut = io.MultiWriter(out, shared), io.MultiWriter(errOut, shared)
+		// be a bad trade.
+		out, errOut = io.MultiWriter(out, w), io.MultiWriter(errOut, w)
 	}
 
-	opts := &slog.HandlerOptions{Level: levelVar, ReplaceAttr: nameTrace}
+	opts := &slog.HandlerOptions{Level: levelVar}
 	build := func(w io.Writer) slog.Handler {
 		if c.Format == "json" {
 			return slog.NewJSONHandler(w, opts)
@@ -90,18 +86,6 @@ func setupLogging(c logConfig) error {
 	slog.SetDefault(slog.New(splitHandler{out: build(out), err: build(errOut)}))
 	current = &c
 	return nil
-}
-
-// nameTrace labels our own level. slog only knows how to print the four it
-// names, so it would render levelTrace as the nearest one plus an offset:
-// "DEBUG-4".
-func nameTrace(_ []string, a slog.Attr) slog.Attr {
-	if a.Key == slog.LevelKey {
-		if l, ok := a.Value.Any().(slog.Level); ok && l == levelTrace {
-			a.Value = slog.StringValue("TRACE")
-		}
-	}
-	return a
 }
 
 // splitHandler sends warn and error to one handler and everything below it to
@@ -140,22 +124,51 @@ func (h splitHandler) WithGroup(name string) slog.Handler {
 	return splitHandler{out: h.out.WithGroup(name), err: h.err.WithGroup(name)}
 }
 
-// syncWriter serialises writes from the two handlers to the one file they
-// share.
-type syncWriter struct {
-	mu sync.Mutex
-	w  io.Writer
+// logDir holds the files save_to_file writes, relative to the working
+// directory — so ./logs next to the binary, and /logs in the container.
+const logDir = "logs"
+
+func today() string { return time.Now().Format(time.DateOnly) }
+
+// dailyWriter appends to logs/auth-hub-YYYY-MM-DD.log, moving to a new file
+// when the date moves. The date in the name is the rotation: no logrotate, no
+// size cap, nothing to configure, and the file a given day's logs are in is
+// the one with that day on it.
+//
+// The lock is doing two jobs. Rolling the file is one. The other is that both
+// handlers write here and each holds only its own stream's lock, so without a
+// lock of its own the file could take a warn in the middle of an info's line.
+type dailyWriter struct {
+	mu  sync.Mutex
+	day string
+	f   *os.File
 }
 
-func (s *syncWriter) Write(b []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.w.Write(b)
+func (d *dailyWriter) Write(b []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.open(today()); err != nil {
+		return 0, err
+	}
+	return d.f.Write(b)
 }
 
-// trace logs at levelTrace, which slog has no method of its own for.
-func trace(ctx context.Context, msg string, args ...any) {
-	slog.Default().Log(ctx, levelTrace, msg, args...)
+// open switches to the given day's file, unless it's already the open one.
+// Appended to, so a restart doesn't eat the earlier part of the day.
+func (d *dailyWriter) open(day string) error {
+	if d.f != nil && d.day == day {
+		return nil
+	}
+	f, err := os.OpenFile(filepath.Join(logDir, "auth-hub-"+day+".log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	if err != nil {
+		return err
+	}
+	if d.f != nil {
+		d.f.Close()
+	}
+	d.f, d.day = f, day
+	return nil
 }
 
 // warnLog adapts our handler back into the *log.Logger that net/http still

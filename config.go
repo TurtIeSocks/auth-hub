@@ -17,14 +17,14 @@ type config struct {
 }
 
 type logConfig struct {
-	// Level is trace, debug, info, warn or error. Reloadable.
+	// Level is debug, info, warn or error. Reloadable.
 	Level string `toml:"level"`
 	// Format is text or json. text reads well over docker logs; json is for
 	// when something downstream is doing the reading.
 	Format string `toml:"format"`
-	// File is a path to append to as well as the streams, or empty for the
-	// streams alone.
-	File string `toml:"file"`
+	// SaveToFile also appends every line to logs/auth-hub-YYYY-MM-DD.log,
+	// alongside the streams rather than instead of them.
+	SaveToFile bool `toml:"save_to_file"`
 }
 
 type poolConfig struct {
