@@ -71,12 +71,62 @@ Edit `config.toml` and auth-hub picks it up within about five seconds. Or send
 kill -HUP $(pidof auth-hub)     # or: docker compose kill -s HUP auth-hub
 ```
 
-Upstreams, secrets and whole pools can all be changed this way. `listen` is the
-exception — the port is already bound, so changing it needs a restart, and a
-reload that tries will say so.
+Upstreams, secrets, whole pools and `log.level` can all be changed this way.
+`listen`, `log.format` and `log.file` are the exceptions — the port is already
+bound and the log handler is already built, so changing those needs a restart,
+and a reload that tries will say so.
 
 A config that doesn't parse or doesn't validate is logged and **ignored**:
 auth-hub carries on with the last good one rather than dropping auth on a typo.
+
+## Logging
+
+```toml
+[log]
+level = "info"    # trace, debug, info, warn or error
+format = "text"   # text, or json if something downstream is reading
+# file = "/var/log/auth-hub.log"
+```
+
+Info, debug and trace go to **stdout**; warn and error go to **stderr**. So
+`./auth-hub 2>/dev/null` is the happy path only, `./auth-hub 2>&1 >/dev/null` is
+just the problems, and nothing has to parse a level field back out to tell them
+apart.
+
+| Level | What it adds |
+| --- | --- |
+| `error` | Every upstream in a pool failed and the login is lost. |
+| `warn` | An upstream failed but another is being tried; the caller gave up; no secret is set; a reload changed something that needs a restart. |
+| `info` | Startup, reloads, pools, drained upstreams. The default. |
+| `debug` | Requests that were rejected — wrong path, wrong method, wrong secret. |
+| `trace` | A line per try, saying which upstream it went to — so a login that failed over shows one line per upstream it touched. |
+
+`level` applies on reload, so debug can go on while something is going wrong and
+back off after, without dropping auth. Secrets are never logged at any level —
+not even the wrong one somebody just sent.
+
+`file` appends to a file *as well as* the console, so `docker compose logs` keeps
+working when you turn it on. In Docker it needs a writable mount of its own —
+`/config` is read-only, deliberately.
+
+Nothing rotates it. If you point logrotate at it, use **`copytruncate`**:
+
+```
+/var/log/auth-hub.log {
+    weekly
+    rotate 8
+    compress
+    copytruncate
+}
+```
+
+auth-hub holds the file open for the life of the process and never reopens it,
+so the default rename-then-create rotation would leave it writing to the rotated
+file for ever, with the new one staying empty. `copytruncate` truncates the same
+file instead, which is safe here because the file is opened `O_APPEND` — every
+write goes to the end of whatever is there now, so nothing is lost to a stale
+offset. Or leave `file` unset and let the console be the log, which is what the
+container wants anyway.
 
 ## How secrets work
 

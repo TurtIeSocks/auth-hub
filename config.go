@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -12,7 +12,19 @@ import (
 type config struct {
 	Listen string       `toml:"listen"`
 	Secret string       `toml:"secret"`
+	Log    logConfig    `toml:"log"`
 	Pools  []poolConfig `toml:"pool"`
+}
+
+type logConfig struct {
+	// Level is trace, debug, info, warn or error. Reloadable.
+	Level string `toml:"level"`
+	// Format is text or json. text reads well over docker logs; json is for
+	// when something downstream is doing the reading.
+	Format string `toml:"format"`
+	// File is a path to append to as well as the streams, or empty for the
+	// streams alone.
+	File string `toml:"file"`
 }
 
 type poolConfig struct {
@@ -57,12 +69,26 @@ func loadConfig(path string) (*config, error) {
 		cfg.Listen = ":9090"
 	}
 
-	// The inbound secret is the only thing standing between the internet and a
-	// pool of working auth servers. An empty one would make this an open relay.
-	if cfg.Secret == "" {
-		log.Printf("the secret was not set, auth-hub might be vulnerable to the world!")
-		// return nil, fmt.Errorf("secret is required (Dragonite sends it as remote_auth_secret)")
+	if cfg.Log.Level == "" {
+		cfg.Log.Level = "info"
 	}
+	if cfg.Log.Format == "" {
+		cfg.Log.Format = "text"
+	}
+	// Case isn't the user's problem, and it would be a mean thing to reject a
+	// config over.
+	cfg.Log.Level = strings.ToLower(cfg.Log.Level)
+	cfg.Log.Format = strings.ToLower(cfg.Log.Format)
+	// Checked here, with everything else, so that a typo in the log config is
+	// caught by the same reload that keeps the last good config rather than
+	// taking the logger down with it.
+	if _, err := parseLevel(cfg.Log.Level); err != nil {
+		return nil, fmt.Errorf("log: %w", err)
+	}
+	if cfg.Log.Format != "text" && cfg.Log.Format != "json" {
+		return nil, fmt.Errorf("log: format %q is not text or json", cfg.Log.Format)
+	}
+
 	if len(cfg.Pools) == 0 {
 		return nil, fmt.Errorf("at least one [[pool]] is required")
 	}

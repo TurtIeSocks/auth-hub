@@ -6,7 +6,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -37,12 +37,19 @@ type hub struct {
 }
 
 func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The rejections below log at debug rather than warn on purpose. Every one
+	// of them is reachable by anything that can open a socket to us, so logging
+	// them by default would hand a stranger a write amplifier pointed at the
+	// disk. At debug they're there when you go looking, which is when a pool
+	// path or a secret has been typed wrong and you need to see it land.
 	p, ok := (*h.pools.Load())[r.URL.Path]
 	if !ok {
+		slog.Debug("no pool for path", "path", r.URL.Path, "remote", r.RemoteAddr)
 		http.NotFound(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
+		slog.Debug("method not allowed", "path", r.URL.Path, "method", r.Method, "remote", r.RemoteAddr)
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -90,7 +97,7 @@ func newPool(pc poolConfig, inSecret string, transport http.RoundTripper) (*pool
 		}
 		w := uc.weight()
 		if w == 0 {
-			log.Printf("pool %s: %s is drained (weight 0)", pc.Path, u.Host)
+			slog.Info("upstream is drained (weight 0)", "pool", pc.Path, "upstream", u.Host)
 			continue
 		}
 		p.upstreams = append(p.upstreams, upstream{url: u, secret: uc.Secret})
@@ -105,6 +112,12 @@ func newPool(pc poolConfig, inSecret string, transport http.RoundTripper) (*pool
 		Transport:    transport,
 		Rewrite:      p.rewrite,
 		ErrorHandler: p.errorHandler,
+		// Left unset, this is the log package's default logger, which
+		// slog.SetDefault points back at our handler — at info, onto stdout.
+		// The things it reports are upstreams misbehaving mid-response, which
+		// errorHandler never sees because the reply has already started. Those
+		// belong on stderr with the rest of the bad news.
+		ErrorLog: warnLog(),
 	}
 	return p, nil
 }
@@ -161,7 +174,13 @@ func (p *pool) dispatch(w http.ResponseWriter, a *attempt) {
 // straight at remote_auth_url, so the upstream URL replaces ours whole rather
 // than being joined onto it.
 func (p *pool) rewrite(r *httputil.ProxyRequest) {
-	u := p.pick(r.In.Context().Value(attemptKey{}).(*attempt))
+	a := r.In.Context().Value(attemptKey{}).(*attempt)
+	u := p.pick(a)
+
+	// The one message per try. Logins are slow and rare, so this is quiet even
+	// at trace — but it's the only place that says which upstream a given login
+	// actually went to, which is the thing you want when one of them is lying.
+	trace(r.In.Context(), "dispatching", "pool", p.path, "upstream", u.url.Host, "try", a.n+1)
 
 	r.Out.URL.Scheme = u.url.Scheme
 	r.Out.URL.Host = u.url.Host
@@ -194,12 +213,23 @@ func (p *pool) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	// remote_auth_timeout_seconds. Another upstream cannot help, and trying one
 	// would burn a login on a caller that has already stopped listening.
 	if a.n+1 < len(p.upstreams) && r.Context().Err() == nil {
-		log.Printf("pool %s: upstream %s failed (%v), trying next", p.path, failed, err)
+		slog.Warn("upstream failed, trying the next one",
+			"pool", p.path, "upstream", failed, "error", err)
 		p.dispatch(w, &attempt{in: a.in, body: a.body, start: a.start, n: a.n + 1})
 		return
 	}
 
-	log.Printf("pool %s: upstream %s failed (%v), giving up after %d try/tries", p.path, failed, err, a.n+1)
+	// Two different things end up here, and only one of them is an upstream's
+	// fault. Reporting a caller that timed out as an upstream failure would
+	// point at a host that never did anything wrong, at the level people wire
+	// alerts to.
+	if r.Context().Err() != nil {
+		slog.Warn("caller gave up before an upstream answered",
+			"pool", p.path, "upstream", failed, "error", err, "tries", a.n+1)
+	} else {
+		slog.Error("every upstream failed",
+			"pool", p.path, "upstream", failed, "error", err, "tries", a.n+1)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = io.WriteString(w, `{"login_code":"","status":"ERROR"}`)
@@ -209,6 +239,10 @@ func (p *pool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	got := []byte(r.Header.Get(secretHeader))
 	want := []byte(p.inSecret)
 	if subtle.ConstantTimeCompare(got, want) != 1 {
+		// Never the secrets themselves, not even the one that was offered: a
+		// near miss is still most of a working secret, and the log is a file
+		// with wider reach than the config it came from.
+		slog.Debug("wrong secret", "pool", p.path, "remote", r.RemoteAddr, "sent_one", len(got) > 0)
 		// Plain text, not the JSON shape: a wrong secret is a config error and
 		// should be loud in Dragonite's log, not a quiet retryable auth miss.
 		http.Error(w, "forbidden", http.StatusForbidden)
