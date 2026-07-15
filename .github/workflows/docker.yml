@@ -3,6 +3,7 @@ name: docker
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 env:
@@ -10,7 +11,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,7 +26,12 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+      # Only main publishes. A pull request builds the image to prove it still
+      # builds, then throws it away: it must not be able to overwrite the tag
+      # main is serving, and a fork's GITHUB_TOKEN is read-only anyway, so
+      # logging in would fail the run for a reason that isn't the PR's fault.
       - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -39,6 +45,6 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

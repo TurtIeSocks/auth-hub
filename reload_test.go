@@ -95,8 +95,8 @@ func TestReloadKeepsPreviousConfigOnError(t *testing.T) {
 	}
 }
 
-// A config that parses but is invalid (no secret => open relay) must be
-// rejected on reload too, not just at startup.
+// A config that parses but is invalid must be rejected on reload too, not just
+// at startup, and the pool it would have replaced must survive it.
 func TestReloadRejectsInvalidConfig(t *testing.T) {
 	up := echoServer(t, "LIVE")
 	path := filepath.Join(t.TempDir(), "config.toml")
@@ -107,12 +107,30 @@ func TestReloadRejectsInvalidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writeConfig(t, path, "", up.URL) // empty secret
+	// Valid TOML, but nothing can dial it.
+	writeConfig(t, path, "s", "ftp://nope.invalid/login-code")
 	if _, err := h.reload(path, newTransport()); err == nil {
-		t.Fatal("reload accepted a config with no secret")
+		t.Fatal("reload accepted an upstream with a non-http scheme")
 	}
 	if body := postTo(h, "/ptc", "s").Body.String(); !strings.Contains(body, "LIVE") {
 		t.Errorf("body = %q — an invalid config took the pool down", body)
+	}
+}
+
+// An empty secret is allowed on purpose: it warns loudly but still serves, so
+// that a hub behind its own firewall isn't forced to invent one. It must not be
+// rejected — reload and startup agree on that.
+func TestReloadAllowsEmptySecret(t *testing.T) {
+	up := echoServer(t, "LIVE")
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeConfig(t, path, "", up.URL)
+
+	h := &hub{}
+	if _, err := h.reload(path, newTransport()); err != nil {
+		t.Fatalf("reload rejected an empty secret: %v", err)
+	}
+	if body := postTo(h, "/ptc", "").Body.String(); !strings.Contains(body, "LIVE") {
+		t.Errorf("body = %q — an empty secret should still serve", body)
 	}
 }
 
