@@ -33,8 +33,17 @@ remote_auth_url = "http://auth-hub:9090/ptc"
 remote_auth_secret = "the same value as auth-hub's `secret`"
 ```
 
-One `[[pool]]` per account provider type, each on its own path. Keep PTC and
-Google in separate pools — a PTC auth server can't service a Google login URL.
+One `[[pool]]` per account provider type, each on its own path.
+
+Upstreams within a pool are interchangeable — that's what makes rotating between
+them safe. Pools exist because that stops at the provider boundary: the login
+URL Dragonite sends is provider specific, so a PTC auth server can't service a
+Google login. Only `ptc` and `g` use remote auth; `nk` authenticates on its own
+and never reaches auth-hub.
+
+Dragonite calls the Google provider `g`, so its section is `[auth.g]` —
+`[auth.google]` is rejected as an unknown provider. The path is auth-hub's own,
+so name it whatever you like as long as Dragonite points at it.
 
 ## Run
 

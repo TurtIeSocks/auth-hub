@@ -16,6 +16,12 @@ secret = "pick-a-long-random-string"
 #   [auth.ptc]
 #   remote_auth_url = "http://auth-hub:9090/ptc"
 #   remote_auth_secret = "pick-a-long-random-string"
+#
+# A pool per provider, rather than one big rotation, because the login URL
+# Dragonite sends is provider specific: a PTC auth server can't service a Google
+# login. Only ptc and g use remote auth at all — nk authenticates on its own and
+# never calls out here. The path is auth-hub's own, so name it whatever you like
+# as long as Dragonite points at it.
 
 [[pool]]
 path = "/ptc"
@@ -31,10 +37,16 @@ path = "/ptc"
   url = "http://auth-2:5090/api/v1/login-code"
   secret = "auth-2-secret"
 
-# A second pool for Google, if you use it. Keep them separate: a PTC auth
-# server can't service a Google login URL.
+# A second pool for Google, if you use it. Dragonite calls that provider "g",
+# so the section over there is [auth.g] — not [auth.google], which it rejects
+# with "unknown auth provider".
+#
+#   [auth.g]
+#   remote_auth_url = "http://auth-hub:9090/g"
+#   remote_auth_secret = "pick-a-long-random-string"
+#
 # [[pool]]
-# path = "/google"
+# path = "/g"
 #
 #   [[pool.upstream]]
 #   url = "http://google-auth-1:5090/api/v1/login-code"
