@@ -57,21 +57,31 @@ This is why you can pool servers that don't share a secret.
 
 ## Behaviour when an upstream is down
 
-The request fails with `{"login_code":"","status":"ERROR"}` and auth-hub logs
-it. Dragonite reads that as its retryable `ErrAuthNoToken` and tries again;
-with N upstreams roughly 1/N of attempts fail until you pull the dead one from
-the config.
+If a request fails to reach its upstream — refused, reset, timed out — auth-hub
+moves on to the next one and tries again, up to once per upstream. A dead
+upstream is invisible to Dragonite as long as one live upstream is left.
 
-auth-hub deliberately never emits `INVALID` or `BANNED` of its own accord.
-Dragonite responds to those by permanently calling `MarkInvalid()` /
-`MarkAuthBanned()` on the account, so a mere connection error must not be able
-to trigger them. Real `INVALID`/`BANNED` verdicts from an upstream pass
-straight through.
+Two things deliberately don't trigger a retry:
+
+- **A reply that arrived.** Only transport failures fail over. If an upstream
+  answers, that answer is the answer, including `INVALID` and `BANNED`.
+- **A caller that gave up.** If Dragonite has hung up or spent its
+  `remote_auth_timeout_seconds`, nothing is listening, and trying more
+  upstreams would just burn logins.
+
+When every upstream has been tried, the request returns
+`{"login_code":"","status":"ERROR"}` and auth-hub logs each failure. Dragonite
+reads that as its retryable `ErrAuthNoToken`.
+
+auth-hub never emits `INVALID` or `BANNED` of its own accord. Dragonite
+responds to those by permanently calling `MarkInvalid()` / `MarkAuthBanned()`
+on the account, so a mere connection error must not be able to trigger them.
 
 ## Not included
 
-- **Health checks / failover to the next upstream on error.** A dead upstream
-  eats its share of requests until removed.
+- **Health checks.** A dead upstream is discovered per request, by failing over
+  rather than by being probed in the background. It still costs one failed dial
+  per turn through the rotation.
 - **Weighting.** Every upstream gets an equal share.
 - **Refresh traffic.** Dragonite's token refresh talks to PTC directly and
   never touches `remote_auth_url`, so it doesn't pass through here.

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/subtle"
 	"io"
 	"log"
@@ -11,6 +13,10 @@ import (
 )
 
 const secretHeader = "X-Remote-Auth-Secret"
+
+// maxBodyBytes caps what we buffer per request so a retry can replay it.
+// Dragonite's login request is a few hundred bytes of JSON.
+const maxBodyBytes = 64 << 10
 
 // newTransport mirrors the transport Dragonite uses to call remote auth
 // directly: single use connections, and no proxy from the environment. Cloning
@@ -34,6 +40,17 @@ type pool struct {
 	proxy     *httputil.ReverseProxy
 }
 
+// attempt is the per-request state. ReverseProxy hands rewrite and errorHandler
+// only a request, so it rides along in the request context.
+type attempt struct {
+	in    *http.Request // the original inbound request, cloned for each try
+	body  []byte
+	start uint64 // this request's slot in the round robin
+	n     int    // which try this is, 0-based
+}
+
+type attemptKey struct{}
+
 func newPool(pc poolConfig, inSecret string, transport http.RoundTripper) (*pool, error) {
 	p := &pool{path: pc.Path, inSecret: inSecret}
 
@@ -53,17 +70,26 @@ func newPool(pc poolConfig, inSecret string, transport http.RoundTripper) (*pool
 	return p, nil
 }
 
-// next returns the next upstream, round robin.
-func (p *pool) next() upstream {
-	i := p.rr.Add(1) - 1
-	return p.upstreams[i%uint64(len(p.upstreams))]
+// pick returns the upstream for this try. Each retry walks one step on from the
+// request's own starting slot, so a request never retries the upstream it just
+// failed on, however the round robin is interleaved with other requests.
+func (p *pool) pick(a *attempt) upstream {
+	return p.upstreams[(a.start+uint64(a.n))%uint64(len(p.upstreams))]
 }
 
-// rewrite retargets the request at the next upstream. Dragonite POSTs straight
-// at remote_auth_url, so the upstream URL replaces ours whole rather than being
-// joined onto it.
+// dispatch sends one try through the proxy.
+func (p *pool) dispatch(w http.ResponseWriter, a *attempt) {
+	r := a.in.Clone(context.WithValue(a.in.Context(), attemptKey{}, a))
+	r.Body = io.NopCloser(bytes.NewReader(a.body))
+	r.ContentLength = int64(len(a.body))
+	p.proxy.ServeHTTP(w, r)
+}
+
+// rewrite retargets the request at this try's upstream. Dragonite POSTs
+// straight at remote_auth_url, so the upstream URL replaces ours whole rather
+// than being joined onto it.
 func (p *pool) rewrite(r *httputil.ProxyRequest) {
-	u := p.next()
+	u := p.pick(r.In.Context().Value(attemptKey{}).(*attempt))
 
 	r.Out.URL.Scheme = u.url.Scheme
 	r.Out.URL.Host = u.url.Host
@@ -79,15 +105,29 @@ func (p *pool) rewrite(r *httputil.ProxyRequest) {
 	}
 }
 
-// errorHandler answers when an upstream is unreachable.
+// errorHandler runs when a try fails at the transport level: refused, reset,
+// timed out. ReverseProxy calls it before anything is written to w, so we are
+// still free to try another upstream.
 //
-// Dragonite ignores the HTTP status and reads only the JSON body. status
-// INVALID makes it call account.MarkInvalid() and BANNED makes it call
-// account.MarkAuthBanned() — both permanent. A transport failure here is our
-// problem, not the account's, so status must never be either of those. An
-// empty login_code lands on Dragonite's retryable ErrAuthNoToken instead.
+// It never reports INVALID or BANNED. Dragonite ignores the HTTP status and
+// reads only the JSON body, and answers INVALID with account.MarkInvalid() and
+// BANNED with account.MarkAuthBanned() — both permanent. A connection problem
+// is ours, not the account's. An empty login_code lands on Dragonite's
+// retryable ErrAuthNoToken instead.
 func (p *pool) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf("pool %s: upstream error: %v", p.path, err)
+	a := r.Context().Value(attemptKey{}).(*attempt)
+	failed := p.pick(a).url.Host
+
+	// A cancelled context means Dragonite hung up or spent its
+	// remote_auth_timeout_seconds. Another upstream cannot help, and trying one
+	// would burn a login on a caller that has already stopped listening.
+	if a.n+1 < len(p.upstreams) && r.Context().Err() == nil {
+		log.Printf("pool %s: upstream %s failed (%v), trying next", p.path, failed, err)
+		p.dispatch(w, &attempt{in: a.in, body: a.body, start: a.start, n: a.n + 1})
+		return
+	}
+
+	log.Printf("pool %s: upstream %s failed (%v), giving up after %d try/tries", p.path, failed, err, a.n+1)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = io.WriteString(w, `{"login_code":"","status":"ERROR"}`)
@@ -102,5 +142,18 @@ func (p *pool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	p.proxy.ServeHTTP(w, r)
+
+	// Buffered up front so a failed try can be replayed against the next
+	// upstream: the proxied body is a stream that can only be read once.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil {
+		http.Error(w, "cannot read body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxBodyBytes {
+		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	p.dispatch(w, &attempt{in: r, body: body, start: p.rr.Add(1) - 1})
 }

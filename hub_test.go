@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -84,9 +88,84 @@ func TestWrongInboundSecretRejected(t *testing.T) {
 	}
 }
 
-// A dead upstream must not look like a credential problem: Dragonite reacts to
-// INVALID/BANNED by permanently marking the account.
-func TestUpstreamDownNeverReportsInvalidOrBanned(t *testing.T) {
+// A dead upstream should be invisible to Dragonite as long as a live one is
+// left: the request fails over rather than failing.
+func TestFailoverToNextUpstream(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s := r.Header.Get(secretHeader); s != "live-secret" {
+			t.Errorf("retry sent secret %q, want live-secret", s)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"username":"u"`) {
+			t.Errorf("retry lost the body: %s", body)
+		}
+		_, _ = io.WriteString(w, `{"login_code":"CODE","status":"OK"}`)
+	}))
+	defer live.Close()
+
+	p := newTestPool(t,
+		upstreamConfig{Url: deadURL, Secret: "dead-secret"},
+		upstreamConfig{Url: live.URL, Secret: "live-secret"},
+	)
+
+	// start=0 hits the dead one first and must fail over to the live one.
+	w := post(p, "dnite-secret")
+	if w.Code != 200 {
+		t.Fatalf("code = %d, want 200 (failover did not happen)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"login_code":"CODE"`) {
+		t.Errorf("body = %q, want the live upstream's answer", w.Body)
+	}
+}
+
+// Every upstream must be tried before giving up, and no upstream twice.
+func TestFailoverTriesEachUpstreamOnce(t *testing.T) {
+	// The handlers never answer, so there is no response to synchronise the
+	// test goroutine with theirs. Guard the record explicitly.
+	var mu sync.Mutex
+	var hits []string
+	mk := func(name string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			hits = append(hits, name)
+			mu.Unlock()
+			// Hijack and close without answering: a transport-level failure.
+			c, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			c.Close()
+		}))
+	}
+	a, b, c := mk("a"), mk("b"), mk("c")
+	defer a.Close()
+	defer b.Close()
+	defer c.Close()
+
+	p := newTestPool(t,
+		upstreamConfig{Url: a.URL, Secret: "s"},
+		upstreamConfig{Url: b.URL, Secret: "s"},
+		upstreamConfig{Url: c.URL, Secret: "s"},
+	)
+
+	post(p, "dnite-secret")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"a", "b", "c"}; !equal(hits, want) {
+		t.Errorf("tried %v, want %v (each upstream exactly once)", hits, want)
+	}
+}
+
+// With every upstream dead there is nothing left to try, and the answer must
+// still not look like a credential problem: Dragonite reacts to INVALID/BANNED
+// by permanently marking the account.
+func TestAllUpstreamsDownNeverReportsInvalidOrBanned(t *testing.T) {
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	deadURL := dead.URL
 	dead.Close() // nothing is listening now
@@ -150,6 +229,59 @@ func TestEmptyUpstreamSecretStripsHeader(t *testing.T) {
 
 	p := newTestPool(t, upstreamConfig{Url: up.URL})
 	post(p, "dnite-secret")
+}
+
+// countingRT fails every try and counts them, so a test can assert exactly how
+// many upstreams a request burned.
+type countingRT struct{ n atomic.Int32 }
+
+func (c *countingRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.n.Add(1)
+	return nil, errors.New("boom")
+}
+
+func newCountingPool(t *testing.T, rt http.RoundTripper) *pool {
+	t.Helper()
+	p, err := newPool(poolConfig{Path: "/ptc", Upstreams: []upstreamConfig{
+		{Url: "http://a.invalid", Secret: "s"},
+		{Url: "http://b.invalid", Secret: "s"},
+		{Url: "http://c.invalid", Secret: "s"},
+	}}, "dnite-secret", rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func postCtx(p *pool, ctx context.Context) {
+	req := httptest.NewRequest("POST", "/ptc", strings.NewReader(`{}`)).WithContext(ctx)
+	req.Header.Set(secretHeader, "dnite-secret")
+	p.ServeHTTP(httptest.NewRecorder(), req)
+}
+
+// A caller that has hung up, or spent its remote_auth_timeout_seconds, must not
+// have the rest of the pool burned on its behalf — it isn't listening anymore.
+func TestNoRetryAfterCallerGivesUp(t *testing.T) {
+	rt := &countingRT{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	postCtx(newCountingPool(t, rt), ctx)
+
+	if got := rt.n.Load(); got != 1 {
+		t.Errorf("tried %d upstreams, want 1: a caller that gave up must not trigger failover", got)
+	}
+}
+
+// The mirror of the above: a live caller does get every upstream tried.
+func TestRetriesEveryUpstreamForLiveCaller(t *testing.T) {
+	rt := &countingRT{}
+
+	postCtx(newCountingPool(t, rt), context.Background())
+
+	if got := rt.n.Load(); got != 3 {
+		t.Errorf("tried %d upstreams, want 3", got)
+	}
 }
 
 // The request body carries plaintext account credentials, so the transport must
