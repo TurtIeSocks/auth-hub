@@ -1,0 +1,45 @@
+# auth-hub config
+#
+# Copy to config.toml and edit. Run: ./auth-hub -config config.toml
+
+# Where auth-hub listens. Defaults to ":9090".
+listen = ":9090"
+
+# The secret Dragonite must send. Put this exact value in Dragonite's
+# remote_auth_secret. auth-hub checks it, then replaces it with the matching
+# upstream's own secret before forwarding. Required.
+secret = "pick-a-long-random-string"
+
+# One [[pool]] per account provider type. Dragonite's remote_auth_url points at
+# listen + path. Requests round robin across that pool's upstreams.
+#
+#   [auth.ptc]
+#   remote_auth_url = "http://auth-hub:9090/ptc"
+#   remote_auth_secret = "pick-a-long-random-string"
+
+[[pool]]
+path = "/ptc"
+
+  [[pool.upstream]]
+  # Full URL of the real auth server endpoint, exactly what you'd have put in
+  # Dragonite's remote_auth_url before.
+  url = "http://auth-1:5090/api/v1/login-code"
+  # That upstream's own secret. Omit if it doesn't check one.
+  secret = "auth-1-secret"
+
+  [[pool.upstream]]
+  url = "http://auth-2:5090/api/v1/login-code"
+  secret = "auth-2-secret"
+
+# A second pool for Google, if you use it. Keep them separate: a PTC auth
+# server can't service a Google login URL.
+# [[pool]]
+# path = "/google"
+#
+#   [[pool.upstream]]
+#   url = "http://google-auth-1:5090/api/v1/login-code"
+#   secret = "google-auth-1-secret"
+#
+#   [[pool.upstream]]
+#   url = "http://google-auth-2:5090/api/v1/login-code"
+#   secret = "google-auth-2-secret"
