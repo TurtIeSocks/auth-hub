@@ -32,10 +32,23 @@ path = "/ptc"
   url = "http://auth-1:5090/api/v1/login-code"
   # That upstream's own secret. Omit if it doesn't check one.
   secret = "auth-1-secret"
+  # Share of the traffic, relative to the other upstreams in this pool.
+  # Defaults to 1, so leave it out and everything splits evenly. Here auth-1
+  # takes 3 logins for every 1 auth-2 takes.
+  weight = 3
 
   [[pool.upstream]]
   url = "http://auth-2:5090/api/v1/login-code"
   secret = "auth-2-secret"
+  weight = 1
+
+# weight = 0 drains an upstream: it keeps its config but takes no traffic at
+# all, not even as a failover target. Handy before restarting one. At least one
+# upstream in a pool has to be above 0.
+#
+#   [[pool.upstream]]
+#   url = "http://auth-3:5090/api/v1/login-code"
+#   weight = 0
 
 # A second pool for Google, if you use it. Dragonite calls that provider "g",
 # so the section over there is [auth.g] — not [auth.google], which it rejects

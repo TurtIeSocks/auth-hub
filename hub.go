@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -55,11 +56,16 @@ type upstream struct {
 }
 
 type pool struct {
-	path      string
-	inSecret  string
+	path     string
+	inSecret string
+	// upstreams holds only the ones that can serve: weight 0 is drained and
+	// never appears, so failover can't wander onto it either.
 	upstreams []upstream
-	rr        atomic.Uint64
-	proxy     *httputil.ReverseProxy
+	// order is one full cycle of the weighted rotation, as indices into
+	// upstreams. Precomputed, so picking is an array read rather than a lock.
+	order []int
+	rr    atomic.Uint64
+	proxy *httputil.ReverseProxy
 }
 
 // attempt is the per-request state. ReverseProxy hands rewrite and errorHandler
@@ -76,13 +82,24 @@ type attemptKey struct{}
 func newPool(pc poolConfig, inSecret string, transport http.RoundTripper) (*pool, error) {
 	p := &pool{path: pc.Path, inSecret: inSecret}
 
+	var weights []int
 	for _, uc := range pc.Upstreams {
 		u, err := url.Parse(uc.Url)
 		if err != nil {
 			return nil, err
 		}
+		w := uc.weight()
+		if w == 0 {
+			log.Printf("pool %s: %s is drained (weight 0)", pc.Path, u.Host)
+			continue
+		}
 		p.upstreams = append(p.upstreams, upstream{url: u, secret: uc.Secret})
+		weights = append(weights, w)
 	}
+	if len(p.upstreams) == 0 {
+		return nil, fmt.Errorf("no upstream with a weight above 0")
+	}
+	p.order = weightedOrder(weights)
 
 	p.proxy = &httputil.ReverseProxy{
 		Transport:    transport,
@@ -92,11 +109,44 @@ func newPool(pc poolConfig, inSecret string, transport http.RoundTripper) (*pool
 	return p, nil
 }
 
-// pick returns the upstream for this try. Each retry walks one step on from the
-// request's own starting slot, so a request never retries the upstream it just
-// failed on, however the round robin is interleaved with other requests.
+// weightedOrder returns one full cycle of the rotation as upstream indices,
+// each appearing weight times. It's nginx's smooth weighted round robin, run
+// ahead of time: smooth means the turns of a heavy upstream are spread through
+// the cycle rather than clumped at the front, so weights 3 and 1 give a,a,b,a
+// instead of a,a,a,b and three concurrent logins don't all pile onto one host.
+//
+// Equal weights come out as plain round robin, so an unweighted config behaves
+// exactly as it did before weights existed. The cycle is self contained — the
+// running totals return to zero — so repeating it holds the ratio for ever.
+func weightedOrder(weights []int) []int {
+	total := 0
+	for _, w := range weights {
+		total += w
+	}
+
+	current := make([]int, len(weights))
+	order := make([]int, 0, total)
+	for range total {
+		best := 0
+		for i, w := range weights {
+			current[i] += w
+			if current[i] > current[best] {
+				best = i
+			}
+		}
+		current[best] -= total
+		order = append(order, best)
+	}
+	return order
+}
+
+// pick returns the upstream for this try. The first try reads the request's own
+// slot in the weighted rotation; a retry walks on from there through upstreams,
+// not through the rotation, so it lands on a different upstream every time
+// rather than on another of a heavy upstream's turns.
 func (p *pool) pick(a *attempt) upstream {
-	return p.upstreams[(a.start+uint64(a.n))%uint64(len(p.upstreams))]
+	first := p.order[a.start%uint64(len(p.order))]
+	return p.upstreams[(first+a.n)%len(p.upstreams)]
 }
 
 // dispatch sends one try through the proxy.

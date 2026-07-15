@@ -219,3 +219,13 @@ func TestStampOnMissingFile(t *testing.T) {
 		t.Errorf("stamp = %q, want empty for a missing file", s)
 	}
 }
+
+// writeTemp writes body to a temp config file and returns its path.
+func writeTemp(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}

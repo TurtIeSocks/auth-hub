@@ -113,11 +113,37 @@ auth-hub never emits `INVALID` or `BANNED` of its own accord. Dragonite
 responds to those by permanently calling `MarkInvalid()` / `MarkAuthBanned()`
 on the account, so a mere connection error must not be able to trigger them.
 
+## Weights
+
+Give an upstream a `weight` to change its share of a pool's traffic:
+
+```toml
+  [[pool.upstream]]
+  url = "http://big-box:5090/api/v1/login-code"
+  weight = 3        # takes 3 logins for every 1 the next one takes
+
+  [[pool.upstream]]
+  url = "http://little-box:5090/api/v1/login-code"
+  weight = 1
+```
+
+`weight` defaults to 1, so leaving it out everywhere splits traffic evenly —
+exactly what an unweighted config has always done.
+
+Turns are spread rather than clumped: weights 3 and 1 rotate `a a b a`, not
+`a a a b`, so concurrent logins don't all pile onto the heavy upstream at once.
+
+`weight = 0` **drains** an upstream — it keeps its config but takes no traffic,
+not even as a failover target. Useful before restarting one. At least one
+upstream in a pool must be above 0. Weights are capped at 1000.
+
+Weights only decide where a request *starts*. Failover ignores them and walks
+the rest of the pool, because at that point it's about finding anything alive.
+
 ## Not included
 
 - **Health checks.** A dead upstream is discovered per request, by failing over
   rather than by being probed in the background. It still costs one failed dial
   per turn through the rotation.
-- **Weighting.** Every upstream gets an equal share.
 - **Refresh traffic.** Dragonite's token refresh talks to PTC directly and
   never touches `remote_auth_url`, so it doesn't pass through here.
