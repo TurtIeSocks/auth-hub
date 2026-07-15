@@ -42,6 +42,22 @@ Google in separate pools — a PTC auth server can't service a Google login URL.
 ./auth-hub -config config.toml
 ```
 
+## Reloading
+
+Edit `config.toml` and auth-hub picks it up within about five seconds. Or send
+`SIGHUP` to apply it immediately, the same way Dragonite reloads:
+
+```sh
+kill -HUP $(pidof auth-hub)     # or: docker compose kill -s HUP auth-hub
+```
+
+Upstreams, secrets and whole pools can all be changed this way. `listen` is the
+exception — the port is already bound, so changing it needs a restart, and a
+reload that tries will say so.
+
+A config that doesn't parse or doesn't validate is logged and **ignored**:
+auth-hub carries on with the last good one rather than dropping auth on a typo.
+
 ## How secrets work
 
 There are two layers, and they're deliberately different values:

@@ -27,6 +27,28 @@ func newTransport() *http.Transport {
 	return &http.Transport{DisableKeepAlives: true}
 }
 
+// hub routes requests to pools by path. The whole set is swapped atomically on
+// reload, so a config change never interrupts a request in flight: one already
+// dispatched keeps the pool it started with.
+type hub struct {
+	pools  atomic.Pointer[map[string]*pool]
+	listen string // the address actually bound, to notice a reload trying to change it
+}
+
+func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p, ok := (*h.pools.Load())[r.URL.Path]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	p.ServeHTTP(w, r)
+}
+
 type upstream struct {
 	url    *url.URL
 	secret string
