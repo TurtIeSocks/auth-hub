@@ -44,12 +44,12 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// path or a secret has been typed wrong and you need to see it land.
 	p, ok := (*h.pools.Load())[r.URL.Path]
 	if !ok {
-		slog.Debug("no pool for path", "path", r.URL.Path, "remote", r.RemoteAddr)
+		slog.Warn("no pool for path", "path", r.URL.Path, "remote", r.RemoteAddr)
 		http.NotFound(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
-		slog.Debug("method not allowed", "path", r.URL.Path, "method", r.Method, "remote", r.RemoteAddr)
+		slog.Warn("method not allowed", "path", r.URL.Path, "method", r.Method, "remote", r.RemoteAddr)
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -180,7 +180,7 @@ func (p *pool) rewrite(r *httputil.ProxyRequest) {
 	// The one message per try, and the only place that says which upstream a
 	// given login actually went to — the thing you want when one of them is
 	// lying. Logins are slow and rare, so this stays quiet even at debug.
-	slog.Debug("dispatching", "pool", p.path, "upstream", u.url.Host, "try", a.n+1)
+	slog.Info("dispatching", "pool", p.path, "upstream", u.url.Host, "try", a.n+1)
 
 	r.Out.URL.Scheme = u.url.Scheme
 	r.Out.URL.Host = u.url.Host
@@ -242,7 +242,7 @@ func (p *pool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Never the secrets themselves, not even the one that was offered: a
 		// near miss is still most of a working secret, and the log is a file
 		// with wider reach than the config it came from.
-		slog.Debug("wrong secret", "pool", p.path, "remote", r.RemoteAddr, "sent_one", len(got) > 0)
+		slog.Warn("wrong secret", "pool", p.path, "remote", r.RemoteAddr, "sent_one", len(got) > 0)
 		// Plain text, not the JSON shape: a wrong secret is a config error and
 		// should be loud in Dragonite's log, not a quiet retryable auth miss.
 		http.Error(w, "forbidden", http.StatusForbidden)
