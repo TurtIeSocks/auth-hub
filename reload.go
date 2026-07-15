@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +22,18 @@ func (h *hub) reload(path string, transport http.RoundTripper) (*config, error) 
 		return nil, err
 	}
 
+	// Before anything below has a chance to log, so that the first startup
+	// message already obeys the config rather than the built-in default.
+	if err := setupLogging(cfg.Log); err != nil {
+		return nil, err
+	}
+
+	// The inbound secret is the only thing standing between the internet and a
+	// pool of working auth servers. An empty one would make this an open relay.
+	if cfg.Secret == "" {
+		slog.Warn("no secret is set, so anything that can reach auth-hub can spend your logins")
+	}
+
 	pools := make(map[string]*pool, len(cfg.Pools))
 	for _, pc := range cfg.Pools {
 		p, err := newPool(pc, cfg.Secret, transport)
@@ -29,7 +41,9 @@ func (h *hub) reload(path string, transport http.RoundTripper) (*config, error) 
 			return nil, fmt.Errorf("pool %s: %w", pc.Path, err)
 		}
 		pools[pc.Path] = p
-		log.Printf("pool %s -> %d upstream(s)", pc.Path, len(pc.Upstreams))
+		// The ones that can actually serve, not the ones in the file: a drained
+		// upstream says so on its own line and shouldn't be counted here too.
+		slog.Info("pool ready", "pool", pc.Path, "upstreams", len(p.upstreams))
 	}
 
 	h.pools.Store(&pools)
@@ -61,7 +75,7 @@ func (h *hub) watch(path string, transport http.RoundTripper) {
 	for {
 		select {
 		case <-sighup:
-			log.Printf("SIGHUP: reloading %s", path)
+			slog.Info("reloading", "config", path, "trigger", "SIGHUP")
 		case <-tick.C:
 			cur := stamp(path)
 			if cur == last {
@@ -70,18 +84,19 @@ func (h *hub) watch(path string, transport http.RoundTripper) {
 			// Recorded before the reload is attempted, so a config that fails
 			// to load is reported once rather than every tick until it's fixed.
 			last = cur
-			log.Printf("%s changed: reloading", path)
+			slog.Info("reloading", "config", path, "trigger", "changed on disk")
 		}
 
 		cfg, err := h.reload(path, transport)
 		if err != nil {
-			log.Printf("reload failed, keeping the previous config: %v", err)
+			slog.Error("reload failed, keeping the previous config", "error", err)
 			continue
 		}
 		if cfg.Listen != h.listen {
-			log.Printf("reload: listen is now %q but auth-hub is bound to %q; restart to move it", cfg.Listen, h.listen)
+			slog.Warn("listen only applies at startup; restart to move it",
+				"configured", cfg.Listen, "bound", h.listen)
 		}
-		log.Printf("reload done")
+		slog.Info("reload done")
 	}
 }
 

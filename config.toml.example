@@ -10,6 +10,31 @@ listen = ":9090"
 # upstream's own secret before forwarding.
 secret = "pick-a-long-random-string"
 
+[log]
+# trace, debug, info, warn or error. Defaults to "info".
+#
+# Unlike everything else here, the level applies on reload without a restart —
+# so you can turn debug on while something is going wrong and back off after,
+# without dropping auth. debug adds the requests that were rejected (wrong path,
+# wrong method, wrong secret); trace adds a line per login saying which upstream
+# it went to.
+level = "info"
+
+# text or json. Defaults to "text". Use json if something downstream is doing
+# the reading; text is easier if that something is you.
+format = "text"
+
+# Append logs to this file as well as to the console. Off by default, and stdout
+# and stderr keep everything either way, so `docker compose logs` doesn't go
+# quiet when you turn it on. In Docker this needs a writable mount of its own —
+# /config is read-only.
+#
+# Nothing rotates it. If you point logrotate at this, it must be copytruncate:
+# auth-hub never reopens the file, so a rename would leave it writing to the
+# rotated one for ever. See the README.
+#
+# file = "/var/log/auth-hub.log"
+
 # One [[pool]] per account provider type. Dragonite's remote_auth_url points at
 # listen + path. Requests round robin across that pool's upstreams.
 #
