@@ -39,10 +39,16 @@ func (h *hub) reload(path string, transport http.RoundTripper) (*config, error) 
 // watch reloads on SIGHUP, the way Dragonite does, and also whenever the config
 // file changes on disk.
 //
-// It polls rather than using fsnotify: no dependency, and polling is what
-// actually works for a config bind-mounted into a container. Watches keyed on
-// the inode miss the common editor pattern of writing a new file and renaming
-// it over the old one, and don't reliably cross a bind mount at all.
+// It polls rather than using fsnotify, because the two fail differently. A
+// missed poll is a reload that lands a few seconds late. A missed inotify event
+// is a reload that never happens and says nothing about it — and inotify is the
+// part that doesn't reliably survive the way this gets deployed, with the config
+// edited on the host and mounted into a container. Being late is recoverable;
+// being silent isn't. Polling is also stdlib, where fsnotify is a dependency.
+//
+// Its own limit: a filesystem with coarse mtime granularity could miss a
+// same-size rewrite inside one tick. stamp keys on size as well to narrow that,
+// and SIGHUP is there when you want the reload now regardless.
 func (h *hub) watch(path string, transport http.RoundTripper) {
 	sighup := make(chan os.Signal, 1)
 	signal.Notify(sighup, syscall.SIGHUP)
