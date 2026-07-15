@@ -5,3 +5,5 @@ config.toml
 config/
 auth-hub
 README.md
+# Local logs are not the image's business.
+logs/

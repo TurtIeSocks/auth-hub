@@ -165,8 +165,77 @@ func TestLogConfigDefaults(t *testing.T) {
 	if cfg.Log.Level != "info" || cfg.Log.Format != "text" {
 		t.Errorf("defaults = %q/%q, want info/text", cfg.Log.Level, cfg.Log.Format)
 	}
-	if cfg.Log.File != "" {
-		t.Errorf("file = %q, want the streams alone by default", cfg.Log.File)
+	if cfg.Log.SaveToFile {
+		t.Error("save_to_file defaulted on, want the streams alone")
+	}
+}
+
+// The date in the name is the only rotation there is, so a hub that runs past
+// midnight has to move to the new day's file rather than writing to yesterday's
+// for ever.
+func TestDailyWriterRollsOverAtMidnight(t *testing.T) {
+	inTempLogDir(t)
+
+	w := &dailyWriter{}
+	for _, day := range []string{"2026-07-14", "2026-07-15"} {
+		if err := w.open(day); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.f.WriteString(day + " line\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for day, want := range map[string]string{
+		"2026-07-14": "2026-07-14 line\n",
+		"2026-07-15": "2026-07-15 line\n",
+	} {
+		got, err := os.ReadFile(filepath.Join(logDir, "auth-hub-"+day+".log"))
+		if err != nil {
+			t.Fatalf("%s: %v", day, err)
+		}
+		if string(got) != want {
+			t.Errorf("auth-hub-%s.log = %q, want %q", day, got, want)
+		}
+	}
+}
+
+// Write picks the day itself, and appends rather than truncating, so a restart
+// doesn't eat the earlier part of the day.
+func TestDailyWriterWritesTodayAndAppends(t *testing.T) {
+	inTempLogDir(t)
+
+	for _, line := range []string{"first\n", "second\n"} {
+		w := &dailyWriter{} // a fresh one each time, as a restart would be
+		if _, err := w.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	name := filepath.Join(logDir, "auth-hub-"+today()+".log")
+	got, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("nothing at %s: %v", name, err)
+	}
+	if string(got) != "first\nsecond\n" {
+		t.Errorf("%s = %q, want both lines", name, got)
+	}
+}
+
+// inTempLogDir runs the test in a scratch working directory, since logDir is
+// relative to it.
+func inTempLogDir(t *testing.T) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(old) })
+	if err := os.MkdirAll(logDir, 0o750); err != nil {
+		t.Fatal(err)
 	}
 }
 
