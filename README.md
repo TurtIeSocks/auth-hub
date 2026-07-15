@@ -42,6 +42,17 @@ Google in separate pools — a PTC auth server can't service a Google login URL.
 ./auth-hub -config config.toml
 ```
 
+### Docker
+
+```sh
+mkdir -p config && cp config.toml.example config/config.toml
+$EDITOR config/config.toml
+docker compose up -d
+```
+
+The compose file mounts the `config/` directory rather than the file itself, so
+that editing the config keeps working regardless of how your editor saves.
+
 ## Reloading
 
 Edit `config.toml` and auth-hub picks it up within about five seconds. Or send

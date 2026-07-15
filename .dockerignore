@@ -1,0 +1,7 @@
+.git
+.github
+# Keep real secrets out of the build context; the image reads a mounted config.
+config.toml
+config/
+auth-hub
+README.md

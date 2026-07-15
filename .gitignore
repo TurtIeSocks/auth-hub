@@ -27,3 +27,4 @@ go.work.sum
 # config with real secrets
 config.toml
 auth-hub
+config/

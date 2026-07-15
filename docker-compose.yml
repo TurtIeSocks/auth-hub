@@ -1,0 +1,16 @@
+services:
+  auth-hub:
+    build: .
+    # Or use a published image instead of building:
+    # image: ghcr.io/turtiesocks/auth-hub:main
+    container_name: auth-hub
+    restart: unless-stopped
+    volumes:
+      # The directory is mounted, not the file. A bind-mounted file is pinned to
+      # one inode, so an editor that saves by writing a new file and renaming it
+      # over the old one would leave this container reading the old config for
+      # ever, and reloads would silently stop working. Read-only: auth-hub only
+      # ever reads its config.
+      - ./config:/config:ro
+    ports:
+      - "9090:9090"
