@@ -177,10 +177,10 @@ func (p *pool) rewrite(r *httputil.ProxyRequest) {
 	a := r.In.Context().Value(attemptKey{}).(*attempt)
 	u := p.pick(a)
 
-	// The one message per try. Logins are slow and rare, so this is quiet even
-	// at trace — but it's the only place that says which upstream a given login
-	// actually went to, which is the thing you want when one of them is lying.
-	trace(r.In.Context(), "dispatching", "pool", p.path, "upstream", u.url.Host, "try", a.n+1)
+	// The one message per try, and the only place that says which upstream a
+	// given login actually went to — the thing you want when one of them is
+	// lying. Logins are slow and rare, so this stays quiet even at debug.
+	slog.Debug("dispatching", "pool", p.path, "upstream", u.url.Host, "try", a.n+1)
 
 	r.Out.URL.Scheme = u.url.Scheme
 	r.Out.URL.Host = u.url.Host

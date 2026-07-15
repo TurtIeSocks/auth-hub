@@ -17,7 +17,7 @@ type config struct {
 }
 
 type logConfig struct {
-	// Level is trace, debug, info, warn or error. Reloadable.
+	// Level is debug, info, warn or error. Reloadable.
 	Level string `toml:"level"`
 	// Format is text or json. text reads well over docker logs; json is for
 	// when something downstream is doing the reading.

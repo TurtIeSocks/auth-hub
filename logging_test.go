@@ -15,7 +15,7 @@ import (
 // splits one across stdout and stderr.
 func testLogger(level slog.Level) (*slog.Logger, *bytes.Buffer, *bytes.Buffer) {
 	var out, err bytes.Buffer
-	opts := &slog.HandlerOptions{Level: level, ReplaceAttr: nameTrace}
+	opts := &slog.HandlerOptions{Level: level}
 	return slog.New(splitHandler{
 		out: slog.NewTextHandler(&out, opts),
 		err: slog.NewTextHandler(&err, opts),
@@ -25,16 +25,14 @@ func testLogger(level slog.Level) (*slog.Logger, *bytes.Buffer, *bytes.Buffer) {
 // The whole point of the split: stdout carries what happened, stderr carries
 // only what went wrong.
 func TestSplitHandlerRoutesByLevel(t *testing.T) {
-	log, out, errBuf := testLogger(levelTrace)
+	log, out, errBuf := testLogger(slog.LevelDebug)
 
-	trace := func(msg string) { log.Log(context.Background(), levelTrace, msg) }
-	trace("to-out-trace")
 	log.Debug("to-out-debug")
 	log.Info("to-out-info")
 	log.Warn("to-err-warn")
 	log.Error("to-err-error")
 
-	for _, want := range []string{"to-out-trace", "to-out-debug", "to-out-info"} {
+	for _, want := range []string{"to-out-debug", "to-out-info"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("stdout missing %q, got: %s", want, out)
 		}
@@ -52,25 +50,14 @@ func TestSplitHandlerRoutesByLevel(t *testing.T) {
 	}
 }
 
-// slog would render our level as "DEBUG-4" left to itself.
-func TestTraceLevelIsNamed(t *testing.T) {
-	log, out, _ := testLogger(levelTrace)
-	log.Log(context.Background(), levelTrace, "hello")
-
-	if !strings.Contains(out.String(), "level=TRACE") {
-		t.Errorf("want level=TRACE, got: %s", out)
-	}
-}
-
 // Below the configured level, nothing is written at all — including to the file
 // the writers may be teed into.
 func TestLevelFilters(t *testing.T) {
 	log, out, _ := testLogger(slog.LevelInfo)
-	log.Log(context.Background(), levelTrace, "trace-msg")
 	log.Debug("debug-msg")
 	log.Info("info-msg")
 
-	if strings.Contains(out.String(), "trace-msg") || strings.Contains(out.String(), "debug-msg") {
+	if strings.Contains(out.String(), "debug-msg") {
 		t.Errorf("level=info still logged below info: %s", out)
 	}
 	if !strings.Contains(out.String(), "info-msg") {
@@ -134,7 +121,7 @@ func TestCallerGaveUpIsNotAnUpstreamError(t *testing.T) {
 
 func TestParseLevel(t *testing.T) {
 	for in, want := range map[string]slog.Level{
-		"trace": levelTrace,
+		"debug": slog.LevelDebug,
 		"DEBUG": slog.LevelDebug, // case is not the user's problem
 		"info":  slog.LevelInfo,
 		"warn":  slog.LevelWarn,
@@ -145,8 +132,10 @@ func TestParseLevel(t *testing.T) {
 			t.Errorf("parseLevel(%q) = %v, %v; want %v", in, got, err, want)
 		}
 	}
-	if _, err := parseLevel("verbose"); err == nil {
-		t.Error("parseLevel accepted a level that doesn't exist")
+	for _, gone := range []string{"verbose", "trace"} {
+		if _, err := parseLevel(gone); err == nil {
+			t.Errorf("parseLevel accepted %q, which is not a level", gone)
+		}
 	}
 }
 

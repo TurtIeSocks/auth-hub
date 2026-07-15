@@ -83,12 +83,11 @@ auth-hub carries on with the last good one rather than dropping auth on a typo.
 
 ```toml
 [log]
-level = "info"    # trace, debug, info, warn or error
+level = "info"    # debug, info, warn or error
 format = "text"   # text, or json if something downstream is reading
-# file = "/var/log/auth-hub.log"
 ```
 
-Info, debug and trace go to **stdout**; warn and error go to **stderr**. So
+Info and debug go to **stdout**; warn and error go to **stderr**. So
 `./auth-hub 2>/dev/null` is the happy path only, `./auth-hub 2>&1 >/dev/null` is
 just the problems, and nothing has to parse a level field back out to tell them
 apart.
@@ -98,8 +97,7 @@ apart.
 | `error` | Every upstream in a pool failed and the login is lost. |
 | `warn` | An upstream failed but another is being tried; the caller gave up; no secret is set; a reload changed something that needs a restart. |
 | `info` | Startup, reloads, pools, drained upstreams. The default. |
-| `debug` | Requests that were rejected — wrong path, wrong method, wrong secret. |
-| `trace` | A line per try, saying which upstream it went to — so a login that failed over shows one line per upstream it touched. |
+| `debug` | Which upstream each try went to, and the requests that were rejected — wrong path, wrong method, wrong secret. |
 
 `level` applies on reload, so debug can go on while something is going wrong and
 back off after, without dropping auth. Secrets are never logged at any level —
@@ -112,7 +110,7 @@ working when you turn it on. In Docker it needs a writable mount of its own —
 Nothing rotates it. If you point logrotate at it, use **`copytruncate`**:
 
 ```
-/var/log/auth-hub.log {
+./logs/auth-hub.log {
     weekly
     rotate 8
     compress

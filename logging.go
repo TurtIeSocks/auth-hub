@@ -11,10 +11,6 @@ import (
 	"sync"
 )
 
-// levelTrace sits below slog's own floor. slog names four levels and stops at
-// Debug, but its levels are plain ints precisely so callers can add their own.
-const levelTrace = slog.Level(-8)
-
 // levelVar carries the level into the handler by reference, so a reload can
 // move it without rebuilding anything. It's the one part of the log config that
 // can change at runtime — and the one you actually want to, since turning on
@@ -25,7 +21,6 @@ var levelVar = new(slog.LevelVar)
 var current *logConfig
 
 var levels = map[string]slog.Level{
-	"trace": levelTrace,
 	"debug": slog.LevelDebug,
 	"info":  slog.LevelInfo,
 	"warn":  slog.LevelWarn,
@@ -35,7 +30,7 @@ var levels = map[string]slog.Level{
 func parseLevel(s string) (slog.Level, error) {
 	l, ok := levels[strings.ToLower(s)]
 	if !ok {
-		return 0, fmt.Errorf("level %q is not one of trace, debug, info, warn, error", s)
+		return 0, fmt.Errorf("level %q is not one of debug, info, warn, error", s)
 	}
 	return l, nil
 }
@@ -79,7 +74,7 @@ func setupLogging(c logConfig) error {
 		out, errOut = io.MultiWriter(out, shared), io.MultiWriter(errOut, shared)
 	}
 
-	opts := &slog.HandlerOptions{Level: levelVar, ReplaceAttr: nameTrace}
+	opts := &slog.HandlerOptions{Level: levelVar}
 	build := func(w io.Writer) slog.Handler {
 		if c.Format == "json" {
 			return slog.NewJSONHandler(w, opts)
@@ -90,18 +85,6 @@ func setupLogging(c logConfig) error {
 	slog.SetDefault(slog.New(splitHandler{out: build(out), err: build(errOut)}))
 	current = &c
 	return nil
-}
-
-// nameTrace labels our own level. slog only knows how to print the four it
-// names, so it would render levelTrace as the nearest one plus an offset:
-// "DEBUG-4".
-func nameTrace(_ []string, a slog.Attr) slog.Attr {
-	if a.Key == slog.LevelKey {
-		if l, ok := a.Value.Any().(slog.Level); ok && l == levelTrace {
-			a.Value = slog.StringValue("TRACE")
-		}
-	}
-	return a
 }
 
 // splitHandler sends warn and error to one handler and everything below it to
@@ -151,11 +134,6 @@ func (s *syncWriter) Write(b []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.w.Write(b)
-}
-
-// trace logs at levelTrace, which slog has no method of its own for.
-func trace(ctx context.Context, msg string, args ...any) {
-	slog.Default().Log(ctx, levelTrace, msg, args...)
 }
 
 // warnLog adapts our handler back into the *log.Logger that net/http still

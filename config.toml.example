@@ -11,13 +11,12 @@ listen = ":9090"
 secret = "pick-a-long-random-string"
 
 [log]
-# trace, debug, info, warn or error. Defaults to "info".
+# debug, info, warn or error. Defaults to "info".
 #
 # Unlike everything else here, the level applies on reload without a restart —
 # so you can turn debug on while something is going wrong and back off after,
-# without dropping auth. debug adds the requests that were rejected (wrong path,
-# wrong method, wrong secret); trace adds a line per login saying which upstream
-# it went to.
+# without dropping auth. debug adds which upstream each try went to, and the
+# requests that were rejected (wrong path, wrong method, wrong secret).
 level = "info"
 
 # text or json. Defaults to "text". Use json if something downstream is doing
