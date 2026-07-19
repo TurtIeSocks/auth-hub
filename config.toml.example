@@ -54,6 +54,9 @@ path = "/ptc"
   url = "http://auth-1:5090/api/v1/login-code"
   # That upstream's own secret. Omit if it doesn't check one.
   secret = "auth-1-secret"
+  # Friendly name in metrics and Grafana. Optional — defaults to the URL host,
+  # so set it only when a host is opaque or you want a nicer graph legend.
+  label = "auth-1"
   # Share of the traffic, relative to the other upstreams in this pool.
   # Defaults to 1, so leave it out and everything splits evenly. Here auth-1
   # takes 3 logins for every 1 auth-2 takes.
@@ -62,6 +65,7 @@ path = "/ptc"
   [[pool.upstream]]
   url = "http://auth-2:5090/api/v1/login-code"
   secret = "auth-2-secret"
+  label = "auth-2"
   weight = 1
 
 # weight = 0 drains an upstream: it keeps its config but takes no traffic at

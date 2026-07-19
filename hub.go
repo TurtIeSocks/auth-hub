@@ -60,6 +60,9 @@ func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type upstream struct {
 	url    *url.URL
 	secret string
+	// label names this upstream in metrics. Resolved once at build: the
+	// configured label, or the URL host when none was given.
+	label string
 }
 
 type pool struct {
@@ -100,7 +103,11 @@ func newPool(pc poolConfig, inSecret string, transport http.RoundTripper) (*pool
 			slog.Info("upstream is drained (weight 0)", "pool", pc.Path, "upstream", u.Host)
 			continue
 		}
-		p.upstreams = append(p.upstreams, upstream{url: u, secret: uc.Secret})
+		label := uc.Label
+		if label == "" {
+			label = u.Host
+		}
+		p.upstreams = append(p.upstreams, upstream{url: u, secret: uc.Secret, label: label})
 		weights = append(weights, w)
 	}
 	if len(p.upstreams) == 0 {

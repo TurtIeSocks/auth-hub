@@ -35,6 +35,11 @@ type poolConfig struct {
 type upstreamConfig struct {
 	Url    string `toml:"url"`
 	Secret string `toml:"secret"`
+	// Label is a friendly name for this upstream in metrics (the `upstream`
+	// label) and grafana. Omitted, it falls back to the URL host, so a series
+	// always has a value; set it when a host is opaque or you want the graph to
+	// read auth-tokyo rather than 10.0.0.4:5090.
+	Label string `toml:"label"`
 	// Weight is a pointer so that an omitted weight (the common case, and every
 	// config written before weights existed) can default to 1 while an explicit
 	// 0 still means something different: drained, gets nothing.
