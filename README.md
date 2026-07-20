@@ -127,6 +127,56 @@ container and go when the container does. Mount a volume there to keep them:
       - ./logs:/logs
 ```
 
+## Metrics
+
+auth-hub can export Prometheus metrics. Off by default — turn it on:
+
+```toml
+[metrics]
+enabled = true
+```
+
+It serves `GET /metrics` on the **same** listener as the proxy. `enabled` is
+reloadable like the pools, so you can turn stats on while something is going
+wrong and back off after, without a restart.
+
+> The endpoint is unauthenticated — keep it on the internal network and don't
+> publish the listen port. The metrics count logins and name your upstreams, but
+> never carry usernames, passwords or secrets.
+
+Give an upstream a `label` for a friendlier name in the graphs; it defaults to
+the URL host:
+
+```toml
+  [[pool.upstream]]
+  url = "http://10.0.0.4:5090/api/v1/login-code"
+  label = "auth-tokyo"
+```
+
+| Metric | Type | Labels | What it is |
+| --- | --- | --- | --- |
+| `authhub_auth_requests_total` | counter | pool, upstream, status | One per request's final outcome. `status` is `success`, `invalid`, `banned`, `timeout` or `error`, sniffed out of the reply body. |
+| `authhub_auth_request_duration_seconds` | histogram | pool, upstream | How long each try's upstream took to answer. |
+| `authhub_upstream_failovers_total` | counter | pool, upstream | An upstream failed at the transport level and the next one was tried. |
+| `authhub_pool_exhausted_total` | counter | pool | Every upstream in the pool failed and the login was lost. |
+| `authhub_caller_aborted_total` | counter | pool | The caller gave up before any upstream answered. |
+| `authhub_requests_in_flight` | gauge | pool | Requests being proxied right now. |
+
+The status count comes from reading the `status` field of each reply as it
+passes through — the body reaches Dragonite byte-for-byte unchanged either way.
+`requests_total` is the single tally of what every request ended as: the
+answering try, or auth-hub's own `error` when the whole pool failed. An
+intermediate failed try is a *failover*, not an outcome, so it doesn't
+double-count there. The standard `go_*` and `process_*` runtime metrics come
+along too.
+
+### Grafana
+
+Import [`grafana/auth-hub.json`](grafana/auth-hub.json) and pick your Prometheus
+datasource. It has a `pool` dropdown and panels for request rate by status and
+by upstream, success rate, latency percentiles, failovers and exhaustion,
+in-flight requests, and process health.
+
 ## How secrets work
 
 There are two layers, and they're deliberately different values:

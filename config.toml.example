@@ -32,6 +32,22 @@ format = "text"
 # /logs and go when the container does — mount a volume there to keep them.
 save_to_file = false
 
+[metrics]
+# Serve Prometheus metrics at GET /metrics on the same listener as the proxy.
+# Off by default — this proxy handles credentials, so nothing new is exposed
+# until you ask for it. Reloadable: flip it and the endpoint follows without a
+# restart.
+#
+# The endpoint is unauthenticated. Keep it on the internal network; don't
+# publish the listen port. The metrics themselves count logins and name your
+# upstreams, but never carry usernames, passwords or secrets.
+#
+# What you get: request counts by pool, upstream and status (SUCCESS, INVALID,
+# BANNED, TIMEOUT, ERROR — sniffed out of each reply), per-upstream latency,
+# failovers, pool exhaustion, and in-flight requests. There's a ready-made
+# Grafana dashboard in grafana/auth-hub.json.
+enabled = true
+
 # One [[pool]] per account provider type. Dragonite's remote_auth_url points at
 # listen + path. Requests round robin across that pool's upstreams.
 #
@@ -54,6 +70,9 @@ path = "/ptc"
   url = "http://auth-1:5090/api/v1/login-code"
   # That upstream's own secret. Omit if it doesn't check one.
   secret = "auth-1-secret"
+  # Friendly name in metrics and Grafana. Optional — defaults to the URL host,
+  # so set it only when a host is opaque or you want a nicer graph legend.
+  label = "auth-1"
   # Share of the traffic, relative to the other upstreams in this pool.
   # Defaults to 1, so leave it out and everything splits evenly. Here auth-1
   # takes 3 logins for every 1 auth-2 takes.
@@ -62,6 +81,7 @@ path = "/ptc"
   [[pool.upstream]]
   url = "http://auth-2:5090/api/v1/login-code"
   secret = "auth-2-secret"
+  label = "auth-2"
   weight = 1
 
 # weight = 0 drains an upstream: it keeps its config but takes no traffic at

@@ -15,7 +15,10 @@ func main() {
 
 	transport := newTransport()
 
-	h := &hub{}
+	// Built once, here: the collectors register on their own registry, and doing
+	// that a second time (say, on a reload) would panic. The reload only flips
+	// the enabled switch.
+	h := &hub{metrics: newMetrics()}
 	cfg, err := h.reload(*cfgPath, transport)
 	if err != nil {
 		// Straight to stderr, not through slog: setting the logger up is one of

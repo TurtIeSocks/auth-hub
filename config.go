@@ -10,10 +10,19 @@ import (
 )
 
 type config struct {
-	Listen string       `toml:"listen"`
-	Secret string       `toml:"secret"`
-	Log    logConfig    `toml:"log"`
-	Pools  []poolConfig `toml:"pool"`
+	Listen  string        `toml:"listen"`
+	Secret  string        `toml:"secret"`
+	Log     logConfig     `toml:"log"`
+	Metrics metricsConfig `toml:"metrics"`
+	Pools   []poolConfig  `toml:"pool"`
+}
+
+type metricsConfig struct {
+	// Enabled serves Prometheus metrics at /metrics on the same listener.
+	// Off by default: this proxy handles credentials, so nothing new is exposed
+	// until you ask for it. Reloadable — flip it and the endpoint follows within
+	// a poll, no restart.
+	Enabled bool `toml:"enabled"`
 }
 
 type logConfig struct {
@@ -35,6 +44,11 @@ type poolConfig struct {
 type upstreamConfig struct {
 	Url    string `toml:"url"`
 	Secret string `toml:"secret"`
+	// Label is a friendly name for this upstream in metrics (the `upstream`
+	// label) and grafana. Omitted, it falls back to the URL host, so a series
+	// always has a value; set it when a host is opaque or you want the graph to
+	// read auth-tokyo rather than 10.0.0.4:5090.
+	Label string `toml:"label"`
 	// Weight is a pointer so that an omitted weight (the common case, and every
 	// config written before weights existed) can default to 1 while an explicit
 	// 0 still means something different: drained, gets nothing.
@@ -97,6 +111,11 @@ func loadConfig(path string) (*config, error) {
 	for i, p := range cfg.Pools {
 		if p.Path == "" || p.Path[0] != '/' {
 			return nil, fmt.Errorf("pool %d: path %q must start with '/'", i, p.Path)
+		}
+		// Reserved whether or not metrics are enabled, so turning them on later
+		// can't collide with a pool that had quietly claimed the path.
+		if p.Path == metricsPath {
+			return nil, fmt.Errorf("pool %d: path %q is reserved for the metrics endpoint", i, p.Path)
 		}
 		if seen[p.Path] {
 			return nil, fmt.Errorf("pool %d: duplicate path %q", i, p.Path)
