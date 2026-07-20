@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"sync/atomic"
+	"time"
 )
 
 const secretHeader = "X-Remote-Auth-Secret"
@@ -32,11 +33,19 @@ func newTransport() *http.Transport {
 // reload, so a config change never interrupts a request in flight: one already
 // dispatched keeps the pool it started with.
 type hub struct {
-	pools  atomic.Pointer[map[string]*pool]
-	listen string // the address actually bound, to notice a reload trying to change it
+	pools   atomic.Pointer[map[string]*pool]
+	listen  string   // the address actually bound, to notice a reload trying to change it
+	metrics *metrics // built once at startup; nil only in tests that drive pools directly
 }
 
 func (h *hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Metrics ride on the same listener, ahead of pool routing so /metrics is
+	// never mistaken for a pool. serveMetrics 404s when stats are off.
+	if r.URL.Path == metricsPath {
+		h.metrics.serveMetrics(w, r)
+		return
+	}
+
 	// The rejections below log at debug rather than warn on purpose. Every one
 	// of them is reachable by anything that can open a socket to us, so logging
 	// them by default would hand a stranger a write amplifier pointed at the
@@ -76,15 +85,20 @@ type pool struct {
 	order []int
 	rr    atomic.Uint64
 	proxy *httputil.ReverseProxy
+	// m is shared with the hub and wired in by reload after the pool is built,
+	// so its ModifyResponse and errorHandler can record. Nil in tests that call
+	// newPool directly, where every metrics call is then a no-op.
+	m *metrics
 }
 
 // attempt is the per-request state. ReverseProxy hands rewrite and errorHandler
 // only a request, so it rides along in the request context.
 type attempt struct {
-	in    *http.Request // the original inbound request, cloned for each try
-	body  []byte
-	start uint64 // this request's slot in the round robin
-	n     int    // which try this is, 0-based
+	in           *http.Request // the original inbound request, cloned for each try
+	body         []byte
+	start        uint64    // this request's slot in the round robin
+	n            int       // which try this is, 0-based
+	dispatchedAt time.Time // when this try was sent, for the latency histogram
 }
 
 type attemptKey struct{}
@@ -116,9 +130,13 @@ func newPool(pc poolConfig, inSecret string, transport http.RoundTripper) (*pool
 	p.order = weightedOrder(weights)
 
 	p.proxy = &httputil.ReverseProxy{
-		Transport:    transport,
-		Rewrite:      p.rewrite,
-		ErrorHandler: p.errorHandler,
+		Transport: transport,
+		Rewrite:   p.rewrite,
+		// Reads the answering upstream's status out of the reply and puts the
+		// body back untouched. A no-op unless metrics are wired and enabled, so
+		// the body is only ever read when someone is counting.
+		ModifyResponse: p.modifyResponse,
+		ErrorHandler:   p.errorHandler,
 		// Left unset, this is the log package's default logger, which
 		// slog.SetDefault points back at our handler — at info, onto stdout.
 		// The things it reports are upstreams misbehaving mid-response, which
@@ -171,10 +189,28 @@ func (p *pool) pick(a *attempt) upstream {
 
 // dispatch sends one try through the proxy.
 func (p *pool) dispatch(w http.ResponseWriter, a *attempt) {
+	a.dispatchedAt = time.Now()
 	r := a.in.Clone(context.WithValue(a.in.Context(), attemptKey{}, a))
 	r.Body = io.NopCloser(bytes.NewReader(a.body))
 	r.ContentLength = int64(len(a.body))
 	p.proxy.ServeHTTP(w, r)
+}
+
+// modifyResponse records the outcome of a try that got an answer. ReverseProxy
+// calls it after the upstream replies and before the body reaches the caller,
+// which is exactly where the status can be read without the caller seeing a
+// difference. The attempt rode along in the request context, so pick names the
+// upstream that actually answered.
+func (p *pool) modifyResponse(resp *http.Response) error {
+	if !p.m.on() {
+		return nil
+	}
+	a, ok := resp.Request.Context().Value(attemptKey{}).(*attempt)
+	if !ok {
+		return nil
+	}
+	p.m.observeResponse(p.path, p.pick(a).label, a.dispatchedAt, resp)
+	return nil
 }
 
 // rewrite retargets the request at this try's upstream. Dragonite POSTs
@@ -214,14 +250,15 @@ func (p *pool) rewrite(r *httputil.ProxyRequest) {
 // retryable ErrAuthNoToken instead.
 func (p *pool) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	a := r.Context().Value(attemptKey{}).(*attempt)
-	failed := p.pick(a).url.Host
+	failed := p.pick(a)
 
 	// A cancelled context means Dragonite hung up or spent its
 	// remote_auth_timeout_seconds. Another upstream cannot help, and trying one
 	// would burn a login on a caller that has already stopped listening.
 	if a.n+1 < len(p.upstreams) && r.Context().Err() == nil {
 		slog.Warn("upstream failed, trying the next one",
-			"pool", p.path, "upstream", failed, "error", err)
+			"pool", p.path, "upstream", failed.url.Host, "error", err)
+		p.m.observeFailover(p.path, failed.label)
 		p.dispatch(w, &attempt{in: a.in, body: a.body, start: a.start, n: a.n + 1})
 		return
 	}
@@ -232,10 +269,12 @@ func (p *pool) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	// alerts to.
 	if r.Context().Err() != nil {
 		slog.Warn("caller gave up before an upstream answered",
-			"pool", p.path, "upstream", failed, "error", err, "tries", a.n+1)
+			"pool", p.path, "upstream", failed.url.Host, "error", err, "tries", a.n+1)
+		p.m.observeAborted(p.path)
 	} else {
 		slog.Error("every upstream failed",
-			"pool", p.path, "upstream", failed, "error", err, "tries", a.n+1)
+			"pool", p.path, "upstream", failed.url.Host, "error", err, "tries", a.n+1)
+		p.m.observeExhausted(p.path, failed.label)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
@@ -267,6 +306,12 @@ func (p *pool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+
+	// One inbound request, in flight until it's answered. Failover re-dispatches
+	// synchronously inside proxy.ServeHTTP, so this brackets the whole thing,
+	// retries included.
+	p.m.inflightAdd(p.path, 1)
+	defer p.m.inflightAdd(p.path, -1)
 
 	p.dispatch(w, &attempt{in: r, body: body, start: p.rr.Add(1) - 1})
 }

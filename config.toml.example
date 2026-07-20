@@ -32,6 +32,22 @@ format = "text"
 # /logs and go when the container does — mount a volume there to keep them.
 save_to_file = false
 
+[metrics]
+# Serve Prometheus metrics at GET /metrics on the same listener as the proxy.
+# Off by default — this proxy handles credentials, so nothing new is exposed
+# until you ask for it. Reloadable: flip it and the endpoint follows without a
+# restart.
+#
+# The endpoint is unauthenticated. Keep it on the internal network; don't
+# publish the listen port. The metrics themselves count logins and name your
+# upstreams, but never carry usernames, passwords or secrets.
+#
+# What you get: request counts by pool, upstream and status (SUCCESS, INVALID,
+# BANNED, TIMEOUT, ERROR — sniffed out of each reply), per-upstream latency,
+# failovers, pool exhaustion, and in-flight requests. There's a ready-made
+# Grafana dashboard in grafana/auth-hub.json.
+enabled = true
+
 # One [[pool]] per account provider type. Dragonite's remote_auth_url points at
 # listen + path. Requests round robin across that pool's upstreams.
 #

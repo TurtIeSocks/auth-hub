@@ -40,6 +40,9 @@ func (h *hub) reload(path string, transport http.RoundTripper) (*config, error) 
 		if err != nil {
 			return nil, fmt.Errorf("pool %s: %w", pc.Path, err)
 		}
+		// Share the one metrics instance so the pool's ModifyResponse and
+		// errorHandler can record against the same registry the endpoint serves.
+		p.m = h.metrics
 		pools[pc.Path] = p
 		// The ones that can actually serve, not the ones in the file: a drained
 		// upstream says so on its own line and shouldn't be counted here too.
@@ -47,6 +50,15 @@ func (h *hub) reload(path string, transport http.RoundTripper) (*config, error) 
 	}
 
 	h.pools.Store(&pools)
+
+	// Flip the switch last, and only report the change: reloads are frequent and
+	// stats being on isn't news every five seconds, but the moment they come on
+	// or off is.
+	if h.metrics != nil {
+		if was := h.metrics.enabled.Swap(cfg.Metrics.Enabled); was != cfg.Metrics.Enabled {
+			slog.Info("metrics", "enabled", cfg.Metrics.Enabled, "path", metricsPath)
+		}
+	}
 	return cfg, nil
 }
 

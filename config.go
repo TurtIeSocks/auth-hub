@@ -10,10 +10,19 @@ import (
 )
 
 type config struct {
-	Listen string       `toml:"listen"`
-	Secret string       `toml:"secret"`
-	Log    logConfig    `toml:"log"`
-	Pools  []poolConfig `toml:"pool"`
+	Listen  string        `toml:"listen"`
+	Secret  string        `toml:"secret"`
+	Log     logConfig     `toml:"log"`
+	Metrics metricsConfig `toml:"metrics"`
+	Pools   []poolConfig  `toml:"pool"`
+}
+
+type metricsConfig struct {
+	// Enabled serves Prometheus metrics at /metrics on the same listener.
+	// Off by default: this proxy handles credentials, so nothing new is exposed
+	// until you ask for it. Reloadable — flip it and the endpoint follows within
+	// a poll, no restart.
+	Enabled bool `toml:"enabled"`
 }
 
 type logConfig struct {
@@ -102,6 +111,11 @@ func loadConfig(path string) (*config, error) {
 	for i, p := range cfg.Pools {
 		if p.Path == "" || p.Path[0] != '/' {
 			return nil, fmt.Errorf("pool %d: path %q must start with '/'", i, p.Path)
+		}
+		// Reserved whether or not metrics are enabled, so turning them on later
+		// can't collide with a pool that had quietly claimed the path.
+		if p.Path == metricsPath {
+			return nil, fmt.Errorf("pool %d: path %q is reserved for the metrics endpoint", i, p.Path)
 		}
 		if seen[p.Path] {
 			return nil, fmt.Errorf("pool %d: duplicate path %q", i, p.Path)
